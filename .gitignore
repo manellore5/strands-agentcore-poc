@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# Local tooling config
+.claude/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# AWS / Docker scratch files (we kept these locally during deployment)
+trust-policy.json
+permissions-policy.json
+response.json
