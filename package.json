@@ -12,6 +12,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",
     "@aws-sdk/client-bedrock-agentcore": "latest",
+    "@aws-sdk/client-bedrock-agentcore-control": "^3.1075.0",
     "@strands-agents/sdk": "latest",
     "dotenv": "^17.4.2",
     "express": "^5.1.0",

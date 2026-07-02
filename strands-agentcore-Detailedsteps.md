@@ -85,9 +85,6 @@ The quality of your tool descriptions directly affects routing accuracy. Write t
 
 The LLM "brain" the agent uses. Strands supports many: Bedrock (Claude via AWS), Anthropic (Claude direct), OpenAI, Google, etc. Swapping providers is a one-line change. You provide the credentials each provider needs.
 
-### Inference profile (Bedrock-specific concept)
-
-A wrapper that lets Bedrock route a model call across multiple AWS regions for better availability. Identified by a `us.` prefix (or `eu.`, `ap.`, etc.) on the model ID. **All Claude 4.x models on Bedrock require inference profiles** — you cannot call them with the raw model ID; you must use the `us.anthropic.claude-...` form.
 
 ### Container image
 

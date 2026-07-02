@@ -23,7 +23,7 @@ const REGION = 'us-east-1';
 // ── THE PROMPT TO SEND ────────────────────────────────────────────────────
 // Change this string to test different agent capabilities. The current
 // prompt exercises BOTH tools (weather + calculator) in a single conversation.
-const PROMPT = 'What is the weather in Sydney, and what is 17 squared?';
+const PROMPT = 'What is the weather in London, and what is 256 divided by 8?';
 // ──────────────────────────────────────────────────────────────────────────
 
 const client = new BedrockAgentCoreClient({ region: REGION });
