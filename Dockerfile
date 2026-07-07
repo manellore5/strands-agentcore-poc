@@ -1,7 +1,7 @@
 # AgentCore Runtime requires linux/arm64 images (Graviton).
 # If you build for amd64 by accident, the container will fail with
 # "exec format error" when AgentCore tries to start it.
-FROM --platform=linux/arm64 public.ecr.aws/docker/library/node:20
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/node:22
 
 WORKDIR /app
 

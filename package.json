@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "A Strands TypeScript agent deployed to Amazon Bedrock AgentCore Runtime",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -20,7 +23,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
   }
