@@ -1,52 +1,46 @@
-/**
- * invoke.ts — Test client for the deployed AgentCore agent.
- *
- * Run: npm run invoke
- *
- * Uses the AWS SDK to invoke your deployed AgentCore Runtime. The SDK
- * handles all the encoding/signing/auth headers for you — much cleaner
- * than wrestling with raw AWS CLI base64 payloads.
- */
-
 import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
-import crypto from 'node:crypto';
+import crypto from 'crypto';
 
-// ── YOUR DEPLOYED RUNTIME ─────────────────────────────────────────────────
-const YOUR_ACCOUNT_ID = process.env.AWS_ACCOUNT_ID ?? '<YOUR_ACCOUNT_ID>';
-const YOUR_RUNTIME_ID = 'my_agent_service-VhlEcEFXr1';
-const REGION = 'us-east-1';
-// ──────────────────────────────────────────────────────────────────────────
+const client = new BedrockAgentCoreClient({ region: 'us-east-1' });
 
-// ── THE PROMPT TO SEND ────────────────────────────────────────────────────
-// Change this string to test different agent capabilities. The current
-// prompt exercises BOTH tools (weather + calculator) in a single conversation.
-const PROMPT = 'What is the weather in London, and what is 256 divided by 8?';
-// ──────────────────────────────────────────────────────────────────────────
+const RUNTIME_ARN =
+  'arn:aws:bedrock-agentcore:us-east-1:362249012325:runtime/my_agent_service-VhlEcEFXr1';
 
-const client = new BedrockAgentCoreClient({ region: REGION });
+// ONE session ID for the whole conversation — this is the key change!
+const conversationSessionId = crypto.randomUUID();
 
-const command = new InvokeAgentRuntimeCommand({
-  // AgentCore requires a session ID of at least 33 characters. randomUUID()
-  // gives us 36 chars of high-entropy randomness — comfortably over the
-  // minimum and unique across calls.
-  runtimeSessionId: `test-session-${Date.now()}-${crypto.randomUUID()}`,
+async function ask(prompt: string, sessionId: string): Promise<string> {
+  console.log(`\n👤 You: ${prompt}`);
+  const command = new InvokeAgentRuntimeCommand({
+    agentRuntimeArn: RUNTIME_ARN,
+    runtimeSessionId: sessionId,
+    payload: new TextEncoder().encode(prompt),
+  });
+  const response = await client.send(command);
+  const body = await response.response?.transformToString();
+  const parsed = JSON.parse(body ?? '{}');
+  const text =
+    parsed?.response?.lastMessage?.content?.[0]?.text ?? JSON.stringify(parsed);
+  console.log(`🤖 Agent: ${text}`);
+  return text;
+}
 
-  agentRuntimeArn: `arn:aws:bedrock-agentcore:${REGION}:${YOUR_ACCOUNT_ID}:runtime/${YOUR_RUNTIME_ID}`,
+async function main() {
+  console.log('=== Conversation 1: same session (should remember) ===');
+  console.log(`Session ID: ${conversationSessionId}`);
 
-  // DEFAULT is the qualifier for the live version of your runtime.
-  qualifier: 'DEFAULT',
+  await ask('My name is Kiran and my favorite city is Sydney.', conversationSessionId);
+  await ask('What is my name?', conversationSessionId);
+  await ask('What is the weather in my favorite city?', conversationSessionId);
 
-  // The payload is sent as bytes — that's why our server uses express.raw().
-  payload: new TextEncoder().encode(PROMPT),
-});
+  console.log('\n=== Conversation 2: NEW session (should forget) ===');
+  const freshSessionId = crypto.randomUUID();
+  console.log(`Session ID: ${freshSessionId}`);
 
-console.log(`Sending prompt: "${PROMPT}"\n`);
+  await ask('What is my name?', freshSessionId);
+}
 
-const response = await client.send(command);
-const textResponse = await response.response!.transformToString();
-
-console.log('Response:\n');
-console.log(textResponse);
+main().catch(console.error);

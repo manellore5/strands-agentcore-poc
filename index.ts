@@ -145,14 +145,69 @@ const weatherTool = strands.tool({
 // Bedrock uses AWS IAM auth — no API key needed.
 // On laptop: uses credentials from `aws configure`.
 // On AgentCore Runtime: uses the IAM role we attached.
-const agent = new strands.Agent({
-  model: new BedrockModel({
-region: 'us-east-1',
-    modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',  }),
-  tools: [calculatorTool, weatherTool],
-  systemPrompt:
-    'You are a helpful assistant. When the user asks for a calculation, use the calculator tool. When the user asks about the weather, use the get_current_weather tool to fetch real data — never make up weather information.',
-});
+//
+// A Strands Agent accumulates conversation history on its own instance. So a
+// single shared agent would mix every caller's turns together — session A would
+// "remember" things said in session B. To get real per-conversation memory we
+// build ONE agent per session id and reuse it for that session's later turns.
+function createAgent(): strands.Agent {
+  return new strands.Agent({
+    model: new BedrockModel({
+      region: 'us-east-1',
+      modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+    }),
+    tools: [calculatorTool, weatherTool],
+    systemPrompt:
+      'You are a helpful assistant. When the user asks for a calculation, use the calculator tool. When the user asks about the weather, use the get_current_weather tool to fetch real data — never make up weather information.',
+  });
+}
+
+// Session id → its agent (holding that conversation's message history) plus the
+// last time we touched it. AgentCore isolates sessions for us at the routing
+// level, but memory is ours to manage. Without eviction this map would grow for
+// the container's whole lifetime, one entry per session ever seen — a slow leak.
+//
+// We mirror AgentCore Runtime's own session timeout: a session that has been
+// idle for 15 minutes is considered dead upstream, so we drop its agent and
+// reclaim the memory. A returning caller past the TTL simply starts fresh —
+// which is exactly what AgentCore would do too.
+const SESSION_IDLE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+interface SessionEntry {
+  agent: strands.Agent;
+  lastAccess: number;
+}
+
+const agentsBySession = new Map<string, SessionEntry>();
+
+function getAgentForSession(sessionId: string): strands.Agent {
+  const now = Date.now();
+  let entry = agentsBySession.get(sessionId);
+  if (entry && now - entry.lastAccess > SESSION_IDLE_TTL_MS) {
+    // Idle too long — treat as expired and rebuild with a clean history.
+    agentsBySession.delete(sessionId);
+    entry = undefined;
+  }
+  if (!entry) {
+    entry = { agent: createAgent(), lastAccess: now };
+    agentsBySession.set(sessionId, entry);
+  } else {
+    entry.lastAccess = now;
+  }
+  return entry.agent;
+}
+
+// Background sweep: proactively evict idle sessions so memory is reclaimed even
+// for callers that never come back (the lazy check above only fires on access).
+// unref() so this timer never keeps the process alive on its own.
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, entry] of agentsBySession) {
+    if (now - entry.lastAccess > SESSION_IDLE_TTL_MS) {
+      agentsBySession.delete(sessionId);
+    }
+  }
+}, SESSION_IDLE_TTL_MS).unref();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3) Wrap the agent in an AgentCore-compatible HTTP server
@@ -182,11 +237,18 @@ app.post(
     try {
       // Decode the raw bytes into a UTF-8 string (the user's prompt).
       const prompt = new TextDecoder().decode(req.body);
-      console.log('Received prompt:', prompt);
 
-      // Run the agent. This is where the magic happens — Strands handles
-      // the LLM call(s), tool execution, and looping until the agent decides
-      // it's done.
+      // AgentCore Runtime forwards the caller's runtimeSessionId in this header.
+      // We key our per-conversation memory off it. Fall back to 'default' if a
+      // caller (or a local curl) sends no session id — that shares one history.
+      const sessionId =
+        req.header('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id') ?? 'default';
+      console.log(`Received prompt (session ${sessionId}):`, prompt);
+
+      // Run the agent for THIS session. Strands handles the LLM call(s), tool
+      // execution, and looping until the agent decides it's done — and this
+      // session's agent carries its own conversation history across turns.
+      const agent = getAgentForSession(sessionId);
       const response = await agent.invoke(prompt);
 
       // Send the full AgentResult back. The caller can pluck out whatever
