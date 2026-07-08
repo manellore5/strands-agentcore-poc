@@ -17,7 +17,6 @@
 // (no .env file is shipped with the Docker image), so production keeps
 // getting its env vars from AgentCore Runtime's --environment-variables flag.
 import 'dotenv/config';
-
 import { z } from 'zod';
 import * as strands from '@strands-agents/sdk';
 // ⬇️ NEW: BedrockModel lives in a separate subpath; this import is the only
@@ -139,8 +138,6 @@ const weatherTool = strands.tool({
 // 2) Build the agent
 // ─────────────────────────────────────────────────────────────────────────────
 
-// The API key comes from the ANTHROPIC_API_KEY environment variable. NEVER
-// hard-code it here — that's how keys get leaked to git, screenshots, logs.
 
 // Bedrock uses AWS IAM auth — no API key needed.
 // On laptop: uses credentials from `aws configure`.
