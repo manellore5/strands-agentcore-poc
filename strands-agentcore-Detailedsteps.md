@@ -9,6 +9,7 @@
 1. [What we built and why](#1-what-we-built-and-why)
 2. [Core concepts (glossary)](#2-core-concepts-glossary)
 3. [Project files explained](#3-project-files-explained)
+   - [3B — Request/response flow & memory diagrams](#3b-requestresponse-flow--memory-diagrams)
 4. [The deployment process (end-to-end)](#4-the-deployment-process-end-to-end)
 5. [Iteration workflow — updating a deployed agent](#5-iteration-workflow--updating-a-deployed-agent)
 6. [Adding more tools to the agent](#6-adding-more-tools-to-the-agent)
@@ -236,6 +237,217 @@ imports
    })
 
 4. app.listen(8080)
+```
+
+---
+
+## 3B. Request/response flow & memory diagrams
+
+> Pictures for the parts that are easy to forget: which file runs first, where text turns into bytes and back, and the AWS concepts that keep tripping people up. Every diagram below is deliberately drawn as a little story — read them out loud and they stick.
+
+### A. The two programs — who runs first
+
+`index.ts` and `invoke.ts` are **two separate programs in two separate processes**. They never share variables — they only meet over the network. The server must already be running before the client can call it.
+
+```
+   invoke.ts  (CLIENT)                          index.ts  (SERVER)
+   the customer — runs ONCE                      the kitchen — runs FOREVER
+   ┌───────────────────────┐                     ┌───────────────────────┐
+   │  npm run invoke       │                     │  npm start            │
+   │   • build a command   │                     │   • boot ONCE         │
+   │   • send the prompt   │ ──── network ────►  │   • then WAIT (idle)  │
+   │   • read the reply    │ ◄──── reply ──────  │   • answer each call  │
+   │   • EXIT              │                     │   • stay alive        │
+   └───────────────────────┘                     └───────────────────────┘
+
+   Timeline:
+     1) SERVER starts ─────────────────────────────►  (idle, waiting)
+     2)                          CLIENT starts, calls ─┘
+     3) SERVER handles the call, sends the reply
+     4) CLIENT prints result, EXITS.   SERVER keeps running.
+```
+
+**Mnemonic:** *the kitchen opens before the customer walks in, and stays open after they leave.*
+
+### B. The round trip — the FOUR encode/decode points
+
+Text travels the wire as **bytes**; your code works with **strings/objects**. So a prompt changes form four times: encode→decode on the way there (request), encode→decode on the way back (response). Every `encode` on one side has a matching `decode` on the other.
+
+```
+  invoke.ts (client)                              index.ts (server)
+  ─────────────────                               ─────────────────
+  prompt (string)
+        │
+   ① TextEncoder().encode()      REQUEST
+        │  string → bytes
+        ▼
+   payload bytes  ───────────► AgentCore ───────────►  req.body (bytes)
+                                                              │
+                                                       ② TextDecoder().decode()
+                                                              │  bytes → string
+                                                              ▼
+                                                        prompt (string)
+                                                              │
+                                                        agent.invoke(prompt)
+                                                              │
+                                                        result (object)
+                                                              │
+                                                       ③ res.json({ response })
+                                                              │  object → JSON → bytes
+                                                              ▼
+   response bytes ◄─────────── AgentCore ◄───────────  (HTTP response body)
+        │                            RESPONSE
+   ④ transformToString() + JSON.parse()
+        │  bytes → string → object
+        ▼
+   parsed.response.lastMessage.content[0].text
+```
+
+| # | File | Code | Transformation | Direction |
+|---|------|------|----------------|-----------|
+| ① | `invoke.ts` | `new TextEncoder().encode(prompt)` | string → bytes | request out |
+| ② | `index.ts` | `new TextDecoder().decode(req.body)` | bytes → string | request in |
+| ③ | `index.ts` | `res.json({ response })` (Express does it) | object → JSON → bytes | response out |
+| ④ | `invoke.ts` | `transformToString()` + `JSON.parse()` | bytes → string → object | response in |
+
+**The symmetry rule:** request travels as **raw UTF-8 text** (①→②); response travels as **JSON** (③→④). Miss or mismatch a pair → garbled text or a parse error.
+
+### C. Step-by-step end-to-end trace
+
+```
+  ┌─ invoke.ts ────────────────────────────────────────────────────────┐
+  │ 1. prompt = "What is my name?"                                      │
+  │ 2. payload = TextEncoder().encode(prompt)          ① string→bytes   │
+  │ 3. cmd = new InvokeAgentRuntimeCommand({arn, sessionId, payload})   │
+  │ 4. await client.send(cmd)   ← SigV4-signs + HTTPS POST to AWS       │
+  └─────────────────────────────────────────────┬──────────────────────┘
+                                                 ▼
+  ┌─ AWS / AgentCore Runtime ──────────────────────────────────────────┐
+  │ 5. verify SigV4 signature (authN) + IAM (authZ)                     │
+  │ 6. route to the container for this runtime + session               │
+  │ 7. forward as  POST /invocations                                   │
+  │    body = the same payload bytes                                   │
+  │    header X-Amzn-Bedrock-AgentCore-Runtime-Session-Id = sessionId  │
+  └─────────────────────────────────────────────┬──────────────────────┘
+                                                 ▼
+  ┌─ index.ts ─────────────────────────────────────────────────────────┐
+  │ 8.  express.raw() puts raw bytes in req.body                       │
+  │ 9.  prompt = TextDecoder().decode(req.body)        ② bytes→string   │
+  │ 10. agent = getAgentForSession(sessionId)  ← per-session memory     │
+  │ 11. result = await agent.invoke(prompt)    ← LLM + tools loop       │
+  │ 12. res.json({ response: result })                 ③ object→bytes   │
+  └─────────────────────────────────────────────┬──────────────────────┘
+                                                 ▼  (reply retraces steps back)
+  ┌─ invoke.ts ────────────────────────────────────────────────────────┐
+  │ 13. body = await response.response.transformToString()  ④ bytes→str │
+  │ 14. parsed = JSON.parse(body)                            ④ str→obj   │
+  │ 15. text = parsed.response.lastMessage.content[0].text              │
+  │ 16. console.log("🤖 Agent:", text)                                  │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+### D. Memory diagrams — the AWS concepts, as pictures
+
+**The AgentCore "contract" — the whole integration in two lines**
+
+```
+   Any container, any language, any framework
+   ┌──────────────────────────────────────────────┐
+   │  GET  /ping         → 200 { status:"Healthy" }│   "are you alive?"
+   │  POST /invocations  → run agent, return reply │   "here's a prompt"
+   └──────────────────────────────────────────────┘
+            ▲
+            │  speak these two endpoints, and AgentCore hosts, scales,
+            │  isolates, logs, and secures you. That's the entire deal.
+```
+
+**IAM — the uniform analogy**
+
+```
+              ROLE  =  a uniform (no password; you WEAR it)
+        ┌──────────────────────────────────────────────┐
+        │  TRUST POLICY   = the bouncer                 │
+        │     "Only the AgentCore service may wear this"│
+        │  ────────────────────────────────────────────│
+        │  PERMISSIONS    = the badges on the uniform   │
+        │     • pull image from ECR                     │
+        │     • write CloudWatch logs                   │
+        │     • bedrock:InvokeModel   ← lets it call Claude, no API key
+        └──────────────────────────────────────────────┘
+   AgentCore asks STS to "put on" the uniform → gets TEMPORARY creds → acts.
+   Wrong bouncer → nobody can wear it. Missing badge → AccessDenied.
+```
+
+**SigV4 — proving you hold the key without ever sending it**
+
+```
+   your SECRET key  (NEVER leaves your machine)
+        │  HMAC chain over  date + region + service
+        ▼
+   signing key (scoped to today + us-east-1 + bedrock-agentcore)
+        │  HMAC-SHA256( canonical request incl. hash of the body )
+        ▼
+   signature ──►  Authorization: AWS4-HMAC-SHA256 ... Signature=abc123…
+        │
+ (HTTPS)▼
+   AWS recomputes the SAME signature with its own copy of your key
+        │
+   match? ──► YES → authenticated → then IAM decides "allowed?"
+              NO  → 403 SignatureDoesNotMatch
+```
+
+*AuthN (SigV4) = "are you really you?"  →  AuthZ (IAM) = "are you allowed?"*
+
+**The deployment pipeline — code to live agent**
+
+```
+   [ index.ts ] ──edit──►  npm run build      (.ts → dist/*.js)
+        │
+        ▼  docker build --platform linux/arm64   ← ARM or "exec format error"
+   [ Docker image ]
+        │  docker push
+        ▼
+   [ ECR ]  private image registry in your AWS account
+        │  AgentCore pulls the image
+        ▼
+   [ AgentCore Runtime ]  wears the IAM role, runs your container
+        │  exposes an AWS-managed endpoint
+        ▼
+   [ Live agent ]  ◄── invoke.ts / boto3 / any SDK calls it
+```
+
+**Per-session memory + 15-min TTL (the fix in this repo)**
+
+```
+   POST /invocations
+   header: X-Amzn-Bedrock-AgentCore-Runtime-Session-Id
+                        │  used as the key
+                        ▼
+      agentsBySession : Map< sessionId , { agent, lastAccess } >
+      ┌────────────┬────────────────────────────────┐
+      │ "sess-A"   │ Agent(history: "…my name is     │  same session
+      │            │        Kiran, city Sydney…")    │  → REMEMBERS
+      ├────────────┼────────────────────────────────┤
+      │ "sess-B"   │ Agent(history: empty)           │  fresh session
+      │            │                                 │  → FORGETS
+      └────────────┴────────────────────────────────┘
+      idle > 15 min ──► entry evicted
+        • lazily, on next access, AND
+        • by an unref()'d background sweep
+   (mirrors AgentCore's own session timeout; stops the map growing forever)
+```
+
+**Why one global agent was a bug (before → after)**
+
+```
+   BEFORE  (leaky)                      AFTER  (isolated)
+   ┌───────────────┐                    ┌───────────────┐   ┌───────────────┐
+   │  ONE agent    │                    │ agent(sess-A) │   │ agent(sess-B) │
+   │  shared by ALL│                    │ history: A    │   │ history: B    │
+   │  sessions     │                    └───────────────┘   └───────────────┘
+   └───────────────┘                    each session gets its own history
+   sess-B "remembers"                   sess-B correctly forgets
+   things from sess-A  ✗                                        ✓
 ```
 
 ---
